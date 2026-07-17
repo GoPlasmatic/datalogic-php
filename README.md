@@ -10,7 +10,7 @@ PHP bindings for [datalogic-rs](https://github.com/GoPlasmatic/datalogic-rs),
 the JSONLogic rules engine with one Rust core and official bindings for
 Rust, Node.js, the browser (WASM), Python, Go, Java, .NET, and PHP. Same
 rules, same semantics: every binding runs the same core and passes the
-same 1,532-case conformance battery (53 suites). Compile once, evaluate
+same 1,565-case conformance battery (54 suites). Compile once, evaluate
 many, natively in PHP.
 
 For the cross-runtime overview and the API-tier model every binding
@@ -297,8 +297,8 @@ for debugging, not hot paths.
 
 ## Performance
 
-<!-- canonical-bench v5.0 -->
-Geomean across 50 operator benchmark suites (Apple M2 Pro, median of 3 runs; pairwise shared-suite ratios per the [methodology](https://github.com/GoPlasmatic/datalogic-rs/blob/main/tools/benchmark/BENCHMARK.md)): the native Rust core evaluates at **8.9 ns/op**, 7.9× faster than json-logic-engine (compiled, the fastest JS engine), 30.6× faster than jsonlogic-rs (the closest Rust alternative), and 104.2× faster than the json-logic-js reference implementation. The WASM build under Node measures 901.1 ns geomean (101× native); on Node servers, prefer `@goplasmatic/datalogic-node`.
+<!-- canonical-bench v5.1 -->
+Geomean across 51 operator benchmark suites (Apple M2 Pro, median of 3 runs; pairwise shared-suite ratios per the [methodology](https://github.com/GoPlasmatic/datalogic-rs/blob/main/tools/benchmark/BENCHMARK.md)): the native Rust core evaluates at **10.3 ns/op**, 7.0× faster than json-logic-engine (compiled, the fastest JS engine), 28.1× faster than jsonlogic-rs (the closest Rust alternative), and 83.6× faster than the json-logic-js reference implementation. The WASM build under Node measures 900.5 ns geomean (88× native); on Node servers, prefer `@goplasmatic/datalogic-node`.
 
 The PHP FFI boundary adds a small per-call marshalling cost on top of
 the core numbers.
