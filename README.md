@@ -11,7 +11,7 @@ the JSONLogic rules engine with one Rust core and official bindings for
 Rust, Node.js, the browser (WASM), Python, Go, Java, .NET, and PHP.
 Compile a rule once and evaluate it many times, natively in PHP. Same
 rules, same semantics: every binding runs the same core and passes the
-same 1,974-case conformance battery (65 suites).
+same 2,128-case conformance battery (66 suites).
 
 For the cross-runtime overview and the API-tier model every binding
 implements, see the
@@ -132,7 +132,7 @@ foreach ($results as $i => $r) {
 
 `BatchItemError` exposes `$status` (the raw C-ABI status code), `$tag`
 (stable engine tag, e.g. `"Thrown"`, `"TypeError"`, `"InvalidOperator"`),
-`$message`, and `$operator` (outermost failing operator, when known).
+`$message`, and `$operator` (innermost failing operator, when known).
 
 ## Sessions (hot loops)
 
@@ -244,7 +244,7 @@ Everything the binding throws extends
 The structured fields ride on the base class as public readonly
 properties: `$errorType` is the stable engine tag (e.g. `"ParseError"`,
 `"Thrown"`, `"TypeError"`, `"InvalidOperator"`, or the binding-level
-`"TypeMismatch"`), `$operatorName` the outermost failing operator
+`"TypeMismatch"`), `$operatorName` the innermost failing operator
 (e.g. `"+"`), and `$pathJson` the root-to-leaf error path as a JSON
 array; each is `null` when not applicable. Arithmetic NaN surfaces as
 `$errorType === "Thrown"` with a message carrying `{"type":"NaN"}`;

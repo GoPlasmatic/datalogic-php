@@ -42,6 +42,13 @@ final class Native
     /** The C ABI generation this binding is written against. */
     public const ABI_VERSION = 2;
 
+    /** The additions to v2 this binding calls (see `datalogic_abi_minor`). */
+    public const ABI_MINOR = 1;
+
+    public const MODE_ENGINE = 0;
+    public const MODE_STRICT = 1;
+    public const MODE_TEMPLATE = 2;
+
     /* datalogic_status values (mirrors the datalogic_status enum). */
     public const STATUS_OK = 0;
     public const STATUS_INVALID_ARG = 1;
@@ -64,8 +71,8 @@ final class Native
             return self::$ffi;
         }
         $ffi = self::fromPreloadedScope()
-            ?? FFI::cdef(self::declarations(), self::locateLibrary());
-        self::assertAbiVersion($ffi->datalogic_abi_version());
+            ?? self::bind(static fn (): FFI => FFI::cdef(self::declarations(), self::locateLibrary()));
+        self::assertAbiVersion($ffi->datalogic_abi_version(), $ffi->datalogic_abi_minor());
         return self::$ffi = $ffi;
     }
 
@@ -86,8 +93,16 @@ final class Native
      *
      * @throws \RuntimeException on an ABI generation mismatch
      */
-    public static function assertAbiVersion(int $got): void
+    public static function assertAbiVersion(int $got, int $minor = self::ABI_MINOR): void
     {
+        if ($got === self::ABI_VERSION && $minor < self::ABI_MINOR) {
+            throw new \RuntimeException(sprintf(
+                'libdatalogic_c implements C ABI v2.%d but this package needs v2.%d. ' .
+                'Rebuild/upgrade the native library (bindings/c) to match this package.',
+                $minor,
+                self::ABI_MINOR,
+            ));
+        }
         if ($got !== self::ABI_VERSION) {
             throw new \RuntimeException(sprintf(
                 'libdatalogic_c ABI version mismatch: binding requires v%d, library reports v%d. ' .
@@ -95,6 +110,34 @@ final class Native
                 self::ABI_VERSION,
                 $got,
             ));
+        }
+    }
+
+    /**
+     * Run an FFI load. FFI resolves every declared function when it loads,
+     * so a library older than this package fails there, on the first
+     * function it lacks, before `assertAbiVersion` can read its version:
+     * that failure is reported as the stale library it is.
+     *
+     * @template T
+     * @param callable(): T $load
+     * @return T
+     */
+    private static function bind(callable $load): mixed
+    {
+        try {
+            return $load();
+        } catch (FFI\Exception $e) {
+            if (!str_contains($e->getMessage(), 'Failed resolving C function')) {
+                throw $e;
+            }
+            throw new \RuntimeException(sprintf(
+                'libdatalogic_c is older than this package, which needs C ABI v%d.%d (%s). ' .
+                'Rebuild/upgrade the native library (bindings/c) to match this package.',
+                self::ABI_VERSION,
+                self::ABI_MINOR,
+                $e->getMessage(),
+            ), 0, $e);
         }
     }
 
@@ -164,14 +207,14 @@ final class Native
             throw new \RuntimeException('cannot write temporary FFI header: ' . $tmp);
         }
         try {
-            $ffi = FFI::load($tmp);
+            $ffi = self::bind(static fn (): ?FFI => FFI::load($tmp));
         } finally {
             @unlink($tmp);
         }
         if ($ffi === null) {
             throw new \RuntimeException('FFI::load failed for the datalogic header');
         }
-        self::assertAbiVersion($ffi->datalogic_abi_version());
+        self::assertAbiVersion($ffi->datalogic_abi_version(), $ffi->datalogic_abi_minor());
         return $ffi;
     }
 
@@ -224,10 +267,12 @@ final class Native
             'Darwin'  => 'darwin',
             default   => 'linux',
         };
-        $arch = match (php_uname('m')) {
+        // Windows reports the machine in upper case (`AMD64`, `ARM64`).
+        $machine = strtolower(php_uname('m'));
+        $arch = match ($machine) {
             'x86_64', 'amd64' => 'x86_64',
             'arm64', 'aarch64' => 'aarch64',
-            default => php_uname('m'),
+            default => $machine,
         };
         return $os . '-' . $arch;
     }
@@ -263,5 +308,47 @@ final class Native
             return null;
         }
         return $len > 0 ? FFI::string($ptr, $len) : '';
+    }
+
+    /* --- native-handle ownership -------------------------------------- */
+
+    /**
+     * Addresses of the native handles a wrapper object currently owns
+     * (and will free). Wrapping a handle twice, as in
+     * `new Rule($other->handle())`, would free it twice.
+     *
+     * @var array<int, string>
+     */
+    private static array $owned = [];
+
+    /**
+     * Record that a wrapper now owns `$handle` and will free it; returns
+     * the address to pass to {@see Native::disown()} once it has.
+     *
+     * @internal
+     * @throws \InvalidArgumentException if another wrapper already owns it
+     */
+    public static function own(CData $handle, string $wrapper): int
+    {
+        $address = self::ffi()->cast('uintptr_t', $handle)->cdata;
+        if (isset(self::$owned[$address])) {
+            throw new \InvalidArgumentException(sprintf(
+                'this native handle is already owned by another %s; wrapping it again would free it twice',
+                self::$owned[$address],
+            ));
+        }
+        self::$owned[$address] = $wrapper;
+        return $address;
+    }
+
+    /**
+     * Forget an address recorded by {@see Native::own()}, after its
+     * handle has been freed.
+     *
+     * @internal
+     */
+    public static function disown(int $address): void
+    {
+        unset(self::$owned[$address]);
     }
 }

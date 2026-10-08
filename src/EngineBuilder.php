@@ -48,6 +48,64 @@ final class EngineBuilder
     }
 
     /**
+     * Set the character that marks a template key as a literal output field
+     * rather than an operator call: with `'$'`, `{"$type": ...}` emits the
+     * key `type`. Only meaningful with templating.
+     */
+    public function withTemplateKeyEscape(string $escape): self
+    {
+        $this->ensureFresh();
+        $codepoint = self::singleCodePoint($escape);
+        if ($codepoint === null) {
+            throw new \InvalidArgumentException('escape must be exactly one character');
+        }
+        $ffi = Native::ffi();
+        $err = Native::newErrorOut();
+        $rc = $ffi->datalogic_engine_builder_set_template_key_escape(
+            $this->handle,
+            $codepoint,
+            FFI::addr($err),
+        );
+        if ($rc !== Native::STATUS_OK) {
+            throw DatalogicException::fromNative($rc, $err, 'set_template_key_escape failed');
+        }
+        return $this;
+    }
+
+    /**
+     * The code point of `$s` when it is exactly one UTF-8 character, else
+     * null. Decoded by hand so the package needs no mbstring: PCRE's `u`
+     * mode validates the UTF-8 and matches one character.
+     */
+    private static function singleCodePoint(string $s): ?int
+    {
+        if (preg_match('/\A.\z/su', $s) !== 1) {
+            return null;
+        }
+        $b = array_values(unpack('C*', $s));
+        return match (count($b)) {
+            1 => $b[0],
+            2 => (($b[0] & 0x1F) << 6) | ($b[1] & 0x3F),
+            3 => (($b[0] & 0x0F) << 12) | (($b[1] & 0x3F) << 6) | ($b[2] & 0x3F),
+            default => (($b[0] & 0x07) << 18) | (($b[1] & 0x3F) << 12)
+                | (($b[2] & 0x3F) << 6) | ($b[3] & 0x3F),
+        };
+    }
+
+    /**
+     * When enabled, a later addOperator() with a name a built-in answers to
+     * (`length`, `var`, an alias such as `?:`) throws with errorType
+     * `ConfigurationError` instead of registering an operator that would
+     * never run. Call it first.
+     */
+    public function withStrictOperatorNames(bool $enabled): self
+    {
+        $this->ensureFresh();
+        Native::ffi()->datalogic_engine_builder_set_strict_operator_names($this->handle, $enabled ? 1 : 0);
+        return $this;
+    }
+
+    /**
      * Set the engine's evaluation configuration from a JSON object
      * string, parsed by the core crate's shared config parser (the same
      * wire format every binding uses). All keys are optional; an
@@ -87,6 +145,34 @@ final class EngineBuilder
         );
         if ($rc !== Native::STATUS_OK) {
             throw DatalogicException::fromNative($rc, $err, 'set_config_json failed');
+        }
+        return $this;
+    }
+
+    /**
+     * Keep the engine to the JSONLogic core and the operator families named
+     * here (`"ExtString"`, `"DateTime"`, ...: the `family` of each row of
+     * `Engine::operators()`). By default the engine has every family. A
+     * family left out is not there for the engine: its names compile as
+     * unknown operators, and a custom operator may take them. Call it before
+     * `addOperator()` when strict operator names are on.
+     *
+     * @throws DatalogicException with error type `"ConfigurationError"` for
+     *         an unknown family name
+     */
+    public function withFamilies(string ...$families): self
+    {
+        $this->ensureFresh();
+        $json = json_encode(array_values($families), JSON_THROW_ON_ERROR);
+        $err = Native::newErrorOut();
+        $rc = Native::ffi()->datalogic_engine_builder_set_families(
+            $this->handle,
+            $json,
+            strlen($json),
+            FFI::addr($err),
+        );
+        if ($rc !== Native::STATUS_OK) {
+            throw DatalogicException::fromNative($rc, $err, 'set_families failed');
         }
         return $this;
     }
@@ -178,6 +264,18 @@ final class EngineBuilder
             throw new \RuntimeException('engine builder build failed');
         }
         return Engine::fromHandle($enginePtr, $this->pinned);
+    }
+
+    /**
+     * Free the native builder of a builder that never reached
+     * {@see EngineBuilder::build()}, for instance after a setter threw.
+     */
+    public function __destruct()
+    {
+        if ($this->handle !== null) {
+            Native::ffi()->datalogic_engine_builder_free($this->handle);
+            $this->handle = null;
+        }
     }
 
     private function ensureFresh(): void

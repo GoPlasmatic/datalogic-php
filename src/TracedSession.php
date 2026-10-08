@@ -21,10 +21,24 @@ use Goplasmatic\Datalogic\Internal\Native;
 final class TracedSession
 {
     private ?CData $handle;
+    /** Address recorded by {@see Native::own()}, released on close. */
+    private int $address;
+    /**
+     * The engine that opened this traced session, set by {@see Engine}. The
+     * native traced session keeps calling the engine's custom operators after
+     * {@see Engine::close()}, so it holds the engine, and with it the
+     * operator callbacks, for as long as it lives.
+     */
+    private ?Engine $engine = null;
 
-    /** @internal */
+    /**
+     * @internal
+     * @throws \InvalidArgumentException if another TracedSession already owns
+     *         `$handle`
+     */
     public function __construct(CData $handle)
     {
+        $this->address = Native::own($handle, 'TracedSession');
         $this->handle = $handle;
     }
 
@@ -41,18 +55,23 @@ final class TracedSession
      * returned {@see TracedRun} ({@see TracedRun::$error}) rather than
      * as a thrown exception — the trace data is always returned
      * alongside, even on failure.
+     *
+     * `$mode` compiles the rule as {@see Engine::compileMode} does
+     * (`Native::MODE_ENGINE`, `MODE_STRICT` or `MODE_TEMPLATE`), so a rule
+     * compiled as a template is traced as one.
      */
-    public function evaluate(string $ruleJson, string $dataJson): TracedRun
+    public function evaluate(string $ruleJson, string $dataJson, int $mode = Native::MODE_ENGINE): TracedRun
     {
         $ffi = Native::ffi();
         $buf = $ffi->new('datalogic_buf');
         $err = Native::newErrorOut();
-        $rc = $ffi->datalogic_traced_session_evaluate(
+        $rc = $ffi->datalogic_traced_session_evaluate_mode(
             $this->handle(),
             $ruleJson,
             strlen($ruleJson),
             $dataJson,
             strlen($dataJson),
+            $mode,
             FFI::addr($buf),
             FFI::addr($err),
         );
@@ -70,6 +89,7 @@ final class TracedSession
             steps:           is_array($decoded['steps'] ?? null) ? $decoded['steps'] : [],
             error:           is_string($decoded['error'] ?? null) ? $decoded['error'] : null,
             structuredError: $decoded['structured_error'] ?? null,
+            pointers:        is_array($decoded['pointers'] ?? null) ? $decoded['pointers'] : [],
         );
     }
 
@@ -78,6 +98,7 @@ final class TracedSession
         if ($this->handle !== null) {
             Native::ffi()->datalogic_traced_session_free($this->handle);
             $this->handle = null;
+            Native::disown($this->address);
         }
     }
 

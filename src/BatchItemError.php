@@ -15,8 +15,8 @@ namespace Goplasmatic\Datalogic;
  *
  * `$status` is the item's raw `datalogic_status`
  * ({@see \Goplasmatic\Datalogic\Internal\Native}::STATUS_*), `$tag`
- * the stable engine error tag (e.g. `"NaN"`, `"Thrown"`), `$operator`
- * the outermost failing operator when known.
+ * the stable engine error tag (e.g. `"Thrown"`, `"TypeError"`), `$operator`
+ * the innermost failing operator when known.
  */
 final class BatchItemError
 {

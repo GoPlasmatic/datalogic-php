@@ -25,10 +25,24 @@ use Goplasmatic\Datalogic\Internal\Native;
 final class Session
 {
     private ?CData $handle;
+    /** Address recorded by {@see Native::own()}, released on close. */
+    private int $address;
+    /**
+     * The engine that opened this session, set by {@see Engine}. The
+     * native session keeps calling the engine's custom operators after
+     * {@see Engine::close()}, so it holds the engine, and with it the
+     * operator callbacks, for as long as it lives.
+     */
+    private ?Engine $engine = null;
 
-    /** @internal */
+    /**
+     * @internal
+     * @throws \InvalidArgumentException if another Session already owns
+     *         `$handle`
+     */
     public function __construct(CData $handle)
     {
+        $this->address = Native::own($handle, 'Session');
         $this->handle = $handle;
     }
 
@@ -76,6 +90,47 @@ final class Session
         }
         // Borrowed until the next call touching this session — copy now.
         return Native::copyBytes($outPtr, $outLen->cdata) ?? '';
+    }
+
+    /**
+     * Evaluate under an operation budget and report what it cost:
+     * `['value' => <json>, 'ops' => <int>]`. `$budget` 0 means the engine's
+     * configured `ops_budget`, or unbounded when it has none. Crossing it
+     * throws an EvaluateException with errorType `BudgetExceeded`.
+     *
+     * @return array{value: string, ops: int}
+     * @throws \InvalidArgumentException when `$budget` is negative
+     */
+    public function evaluateMetered(Rule $rule, string $dataJson, int $budget = 0): array
+    {
+        // The native parameter is unsigned: a negative budget would wrap to
+        // an unbounded one.
+        if ($budget < 0) {
+            throw new \InvalidArgumentException('budget must be >= 0');
+        }
+        $ffi = Native::ffi();
+        $outPtr = $ffi->new('const uint8_t*');
+        $outLen = $ffi->new('size_t');
+        $outOps = $ffi->new('uint64_t');
+        $err = Native::newErrorOut();
+        $rc = $ffi->datalogic_session_evaluate_metered(
+            $this->handle(),
+            $rule->handle(),
+            $dataJson,
+            strlen($dataJson),
+            $budget,
+            FFI::addr($outPtr),
+            FFI::addr($outLen),
+            FFI::addr($outOps),
+            FFI::addr($err),
+        );
+        if ($rc !== Native::STATUS_OK) {
+            throw DatalogicException::fromNative($rc, $err, 'session evaluate failed');
+        }
+        return [
+            'value' => Native::copyBytes($outPtr, $outLen->cdata) ?? '',
+            'ops' => $outOps->cdata,
+        ];
     }
 
     /**
@@ -312,6 +367,7 @@ final class Session
         if ($this->handle !== null) {
             Native::ffi()->datalogic_session_free($this->handle);
             $this->handle = null;
+            Native::disown($this->address);
         }
     }
 

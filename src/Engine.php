@@ -25,10 +25,14 @@ use Goplasmatic\Datalogic\Internal\Native;
 class Engine
 {
     private ?CData $handle;
+    /** Address recorded by {@see Native::own()}, released on close. */
+    private int $address;
     /**
      * Retain Closure references for any custom operators registered on
      * this engine so PHP doesn't GC them while the C side still holds
-     * the function pointer.
+     * the function pointer. Kept after {@see Engine::close()}: every
+     * Rule, Session and TracedSession holds the engine, and their native
+     * handles keep calling these operators.
      *
      * @var list<callable>
      */
@@ -41,6 +45,7 @@ class Engine
         if ($handle === null) {
             throw new \RuntimeException('datalogic_engine_new returned NULL');
         }
+        $this->address = Native::own($handle, 'Engine');
         $this->handle = $handle;
     }
 
@@ -49,10 +54,16 @@ class Engine
      * native handle and adopt the builder's pinned callbacks.
      *
      * @param list<callable> $adoptedCallbacks
+     * @throws \InvalidArgumentException if another Engine already owns
+     *         `$handle`
      */
     public static function fromHandle(CData $handle, array $adoptedCallbacks = []): self
     {
+        // Claim the handle before the instance exists: a refused handle
+        // must leave no Engine behind whose destructor would run.
+        $address = Native::own($handle, 'Engine');
         $engine = (new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        $engine->address = $address;
         $engine->handle = $handle;
         $engine->retainedCallbacks = $adoptedCallbacks;
         return $engine;
@@ -78,20 +89,149 @@ class Engine
     /** Compile a JSONLogic rule (JSON-string) into a reusable {@see Rule}. */
     public function compile(string $ruleJson): Rule
     {
-        $ffi = Native::ffi();
-        $out = $ffi->new('datalogic_rule*');
-        $err = Native::newErrorOut();
-        $rc = $ffi->datalogic_engine_compile(
+        return $this->compileWith(fn ($ffi, $out, $err) => $ffi->datalogic_engine_compile(
             $this->handle(),
             $ruleJson,
             strlen($ruleJson),
             FFI::addr($out),
             FFI::addr($err),
-        );
+        ));
+    }
+
+    /**
+     * What every compile method shares: `$call` makes one native compile
+     * call into the given out slots; a failure throws, a success wraps the
+     * rule handle.
+     *
+     * @param callable(FFI, CData, CData): int $call
+     */
+    private function compileWith(callable $call): Rule
+    {
+        $ffi = Native::ffi();
+        $out = $ffi->new('datalogic_rule*');
+        $err = Native::newErrorOut();
+        $rc = $call($ffi, $out, $err);
         if ($rc !== Native::STATUS_OK) {
             throw DatalogicException::fromNative($rc, $err, 'compile failed');
         }
-        return new Rule($out);
+        return $this->adopt(new Rule($out));
+    }
+
+    /**
+     * Make `$wrapper` (a Rule, Session or TracedSession this engine just
+     * opened) hold this engine, whose custom operators its native handle
+     * keeps calling after {@see Engine::close()}.
+     *
+     * @template T of Rule|Session|TracedSession
+     * @param T $wrapper
+     * @return T
+     */
+    private function adopt(Rule|Session|TracedSession $wrapper): Rule|Session|TracedSession
+    {
+        $engine = $this;
+        (function () use ($engine): void {
+            $this->engine = $engine;
+        })->call($wrapper);
+        return $wrapper;
+    }
+
+    /** Compile `$ruleJson` in templating mode, whatever this engine's mode. */
+    public function compileTemplate(string $ruleJson): Rule
+    {
+        return $this->compileMode($ruleJson, Native::MODE_TEMPLATE);
+    }
+
+    /** Compile `$ruleJson` outside templating mode, whatever this engine's mode. */
+    public function compileStrict(string $ruleJson): Rule
+    {
+        return $this->compileMode($ruleJson, Native::MODE_STRICT);
+    }
+
+    /**
+     * Compile `$ruleJson` in `$mode` (`Native::MODE_ENGINE`, `MODE_STRICT`
+     * or `MODE_TEMPLATE`), whatever mode this engine was built with.
+     */
+    public function compileMode(string $ruleJson, int $mode): Rule
+    {
+        return $this->compileWith(fn ($ffi, $out, $err) => $ffi->datalogic_engine_compile_mode(
+            $this->handle(),
+            $ruleJson,
+            strlen($ruleJson),
+            $mode,
+            FFI::addr($out),
+            FFI::addr($err),
+        ));
+    }
+
+    /**
+     * Compile `$ruleJson`, refusing it if {@see Engine::check()} finds any
+     * error: throws a ParseException with errorType `CompileError` whose
+     * `diagnosticsJson` lists every problem.
+     */
+    public function compileChecked(string $ruleJson): Rule
+    {
+        return $this->compileWith(fn ($ffi, $out, $err) => $ffi->datalogic_engine_compile_checked(
+            $this->handle(),
+            $ruleJson,
+            strlen($ruleJson),
+            FFI::addr($out),
+            FFI::addr($err),
+        ));
+    }
+
+    /**
+     * Every problem this engine can see in `$ruleJson` before it runs, as a
+     * JSON array of `{code, severity, message, pointer, operator}`.
+     */
+    public function check(string $ruleJson, int $mode = Native::MODE_ENGINE): string
+    {
+        $ffi = Native::ffi();
+        $buf = $ffi->new('datalogic_buf');
+        $err = Native::newErrorOut();
+        $rc = $ffi->datalogic_engine_check(
+            $this->handle(),
+            $ruleJson,
+            strlen($ruleJson),
+            $mode,
+            FFI::addr($buf),
+            FFI::addr($err),
+        );
+        if ($rc !== Native::STATUS_OK) {
+            throw DatalogicException::fromNative($rc, $err, 'check failed');
+        }
+        return Native::takeBuf($buf);
+    }
+
+    /** Every built-in operator, as a JSON array in the schema of the docs' operators.json. */
+    public function operators(): string
+    {
+        $ffi = Native::ffi();
+        $buf = $ffi->new('datalogic_buf');
+        $err = Native::newErrorOut();
+        $rc = $ffi->datalogic_engine_operators($this->handle(), FFI::addr($buf), FFI::addr($err));
+        if ($rc !== Native::STATUS_OK) {
+            throw DatalogicException::fromNative($rc, $err, 'operators failed');
+        }
+        return Native::takeBuf($buf);
+    }
+
+    /** Whether the JSON `$valueJson` is truthy under this engine's configured truthiness. */
+    public function truthy(string $valueJson): bool
+    {
+        $ffi = Native::ffi();
+        $out = $ffi->new('int32_t');
+        $err = Native::newErrorOut();
+        $rc = $ffi->datalogic_engine_truthy(
+            $this->handle(),
+            $valueJson,
+            strlen($valueJson),
+            FFI::addr($out),
+            FFI::addr($err),
+        );
+        if ($rc !== Native::STATUS_OK) {
+            throw DatalogicException::fromNative($rc, $err, 'truthy failed');
+        }
+        return $out->cdata !== 0;
     }
 
     /**
@@ -125,7 +265,7 @@ class Engine
         if ($s === null) {
             throw new \RuntimeException('datalogic_engine_session returned NULL');
         }
-        return new Session($s);
+        return $this->adopt(new Session($s));
     }
 
     /** Open a {@see TracedSession} for traced evaluation. */
@@ -135,7 +275,7 @@ class Engine
         if ($s === null) {
             throw new \RuntimeException('datalogic_engine_traced_session returned NULL');
         }
-        return new TracedSession($s);
+        return $this->adopt(new TracedSession($s));
     }
 
     /** Construct a builder for engines with custom operators. */
@@ -150,8 +290,8 @@ class Engine
         if ($this->handle !== null) {
             Native::ffi()->datalogic_engine_free($this->handle);
             $this->handle = null;
+            Native::disown($this->address);
         }
-        $this->retainedCallbacks = [];
     }
 
     public function __destruct()

@@ -19,10 +19,24 @@ use Goplasmatic\Datalogic\Internal\Native;
 final class Rule
 {
     private ?CData $handle;
+    /** Address recorded by {@see Native::own()}, released on close. */
+    private int $address;
+    /**
+     * The engine that opened this rule, set by {@see Engine}. The
+     * native rule keeps calling the engine's custom operators after
+     * {@see Engine::close()}, so it holds the engine, and with it the
+     * operator callbacks, for as long as it lives.
+     */
+    private ?Engine $engine = null;
 
-    /** @internal */
+    /**
+     * @internal
+     * @throws \InvalidArgumentException if another Rule already owns
+     *         `$handle`
+     */
     public function __construct(CData $handle)
     {
+        $this->address = Native::own($handle, 'Rule');
         $this->handle = $handle;
     }
 
@@ -33,6 +47,23 @@ final class Rule
             throw new \RuntimeException('Rule has been closed');
         }
         return $this->handle;
+    }
+
+    /**
+     * What the rule reads and calls, as JSON: `{reads, computed_reads,
+     * reads_complete, reads_data, operators, custom_operators,
+     * deterministic}`, each read path as its segments.
+     */
+    public function facts(): string
+    {
+        $ffi = Native::ffi();
+        $buf = $ffi->new('datalogic_buf');
+        $err = Native::newErrorOut();
+        $rc = $ffi->datalogic_rule_facts($this->handle(), FFI::addr($buf), FFI::addr($err));
+        if ($rc !== Native::STATUS_OK) {
+            throw DatalogicException::fromNative($rc, $err, 'facts failed');
+        }
+        return Native::takeBuf($buf);
     }
 
     /**
@@ -74,6 +105,7 @@ final class Rule
         if ($this->handle !== null) {
             Native::ffi()->datalogic_rule_free($this->handle);
             $this->handle = null;
+            Native::disown($this->address);
         }
     }
 
